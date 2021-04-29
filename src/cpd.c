@@ -250,7 +250,7 @@ static val_t p_calc_fit(
   val_t const norm_mats = p_kruskal_norm(nmodes, lambda, aTa);
 
   /* Compute inner product of tensor with new model */
-  val_t const inner = p_tt_kruskal_inner(nmodes, rinfo, thds, lambda, mats,m1);
+  val_t const inner = p_tt_kruskal_inner(nmodes, rinfo, thds, lambda, mats, m1);
 
   /*
    * We actually want sqrt(<X,X> + <Y,Y> - 2<X,Y>), but if the fit is perfect
@@ -314,6 +314,21 @@ double cpd_als_iterate(
   sp_timer_t modetime[MAX_NMODES];
   timer_start(&timers[TIMER_CPD]);
 
+  double cpd_tot, mttkrp_tot, backsolve_tot, update_tot, fit_tot, norm_tot, copy_tot;
+  double t_cpd, t_mttkrp, t_backsolve, t_update, t_fit, t_norm, t_copy;
+
+  // To obtain per iteration time
+  int num_iters = 0;
+
+  cpd_tot = 0.0;
+  mttkrp_tot = 0.0;
+  backsolve_tot = 0.0;
+  update_tot = 0.0;
+  fit_tot = 0.0;
+  copy_tot = 0.0;
+
+  cpd_tot = omp_get_wtime();
+
   idx_t const niters = (idx_t) opts[SPLATT_OPTION_NITER];
   for(idx_t it=0; it < niters; ++it) {
     timer_fstart(&itertime);
@@ -324,34 +339,47 @@ double cpd_als_iterate(
 
       /* M1 = X * (C o B) */
       timer_start(&timers[TIMER_MTTKRP]);
+      t_mttkrp = omp_get_wtime();
       mttkrp_csf(tensors, mats, m, thds, mttkrp_ws, opts);
       timer_stop(&timers[TIMER_MTTKRP]);
-
+      mttkrp_tot += omp_get_wtime() - t_mttkrp;
 #if 0
       /* M2 = (CtC .* BtB .* ...)^-1 */
       calc_gram_inv(m, nmodes, aTa);
       /* A = M1 * M2 */
       memset(mats[m]->vals, 0, mats[m]->I * nfactors * sizeof(val_t));
-      mat_matmul(m1, aTa[MAX_NMODES], mats[m]);
+      mat_matmul(m1, aTa[MAXxr_NMODES], mats[m]);
 #else
+      t_copy = omp_get_wtime();
       par_memcpy(mats[m]->vals, m1->vals, m1->I * nfactors * sizeof(val_t));
+      copy_tot += omp_get_wtime() - t_copy;
+
+      t_backsolve = omp_get_wtime();
       mat_solve_normals(m, nmodes, aTa, mats[m],
           opts[SPLATT_OPTION_REGULARIZE]);
+      backsolve_tot += omp_get_wtime() - t_backsolve;
 #endif
 
+      t_norm = omp_get_wtime();
       /* normalize columns and extract lambda */
       if(it == 0) {
         mat_normalize(mats[m], lambda, MAT_NORM_2, rinfo, thds, nthreads);
       } else {
         mat_normalize(mats[m], lambda, MAT_NORM_MAX, rinfo, thds,nthreads);
       }
+      norm_tot += omp_get_wtime() - t_norm;
 
+      t_update = omp_get_wtime();
       /* update A^T*A */
       mat_aTa(mats[m], aTa[m], rinfo, thds, nthreads);
       timer_stop(&modetime[m]);
+      update_tot += omp_get_wtime() - t_update;
     } /* foreach mode */
 
+    t_fit = omp_get_wtime();
     fit = p_calc_fit(nmodes, rinfo, thds, ttnormsq, lambda, mats, m1, aTa);
+    fit_tot += omp_get_wtime() - t_fit;
+
     timer_stop(&itertime);
 
     if(rinfo->rank == 0 &&
@@ -367,11 +395,15 @@ double cpd_als_iterate(
     }
     if(fit == 1. || 
         (it > 0 && fabs(fit - oldfit) < opts[SPLATT_OPTION_TOLERANCE])) {
-      break;
+          num_iters = it+1;
+          break;
     }
     oldfit = fit;
+    num_iters = it+1;
   }
   timer_stop(&timers[TIMER_CPD]);
+
+  cpd_tot = omp_get_wtime() - cpd_tot;
 
   cpd_post_process(nfactors, nmodes, mats, lambda, thds, nthreads, rinfo);
 
@@ -382,6 +414,25 @@ double cpd_als_iterate(
   }
   mat_free(aTa[MAX_NMODES]);
   thd_free(thds, nthreads);
+
+/*
+  printf("CPD TOT\nMTTKRP TOT\nBACKSOLVE\nUPDATE\nCOPY\nNORM\n");
+  printf("%lf\n%lf\n%lf\n%lf\n%lf\n%lf\n", cpd_tot, mttkrp_tot, backsolve_tot, update_tot, copy_tot, norm_tot);
+
+  printf("TOTAL\t%lf\nMTTKRP\t%lf\nSOLVE\t%lf\nFIT\t%lf\nUPDATE\t%lf\nNORM\t%lf\nCOPY\t%lf\n", 
+  cpd_tot/num_iters, mttkrp_tot/num_iters, backsolve_tot/num_iters, fit_tot/num_iters, update_tot/num_iters, norm_tot/num_iters, copy_tot/num_iters);
+*/
+
+  printf("Total     MTTKRP    PseudoInv MemCopy   Normalize Update    Fit\n");
+  printf("%07.4f   %07.4f   %07.4f   %07.4f   %07.4f   %07.4f   %07.4f\n",
+          cpd_tot, mttkrp_tot, backsolve_tot, copy_tot, norm_tot, update_tot, fit_tot
+  );
+
+  printf("Per iteration\n%07.4f   %07.4f   %07.4f   %07.4f   %07.4f   %07.4f   %07.4f\n",
+          cpd_tot/num_iters, mttkrp_tot/num_iters, backsolve_tot/num_iters, copy_tot/num_iters, norm_tot/num_iters, update_tot/num_iters, fit_tot/num_iters
+  );
+
+
 
   return fit;
 }

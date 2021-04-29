@@ -204,6 +204,43 @@ static void p_mat_maxnorm(
   } /* end omp parallel */
 }
 
+// static void p_mat_maxnorm(
+//   matrix_t * const A,
+//   val_t * const restrict lambda,
+//   rank_info * const rinfo,
+//   thd_info * const thds)
+// {
+//   idx_t const I = A->I;
+//   idx_t const J = A->J;
+//   val_t * const restrict vals = A->vals;
+
+//   #pragma omp parallel 
+//   {
+//     // printf("omp num threads: %d\n", omp_gxet_num_threads());
+//     #pragma omp for schedule(static) 
+//     for(idx_t i = 0; i < I; i++) {
+//         for(idx_t j = 0; j < J; j++) {
+//             lambda[j] = SS_MAX(lambda[j], vals[i * J + j]);
+//         }
+//     }
+
+//     // If any entry is less than 1, set it to 1
+//     #pragma omp for schedule(static) 
+//     for(idx_t i = 0; i < J; i++) {
+//         lambda[i] = SS_MAX(lambda[i], 1.);
+//     }
+
+//     #pragma omp barrier 
+
+//     #pragma omp for schedule(static)
+//     for(idx_t i = 0; i < I; i++) {
+//         for(idx_t j = 0; j < J; j++) {
+//             vals[i * J + j] /= lambda[j];
+//         }
+//     }
+//   }
+// }
+
 
 /**
 * @brief Solve the system LX = B.
@@ -551,11 +588,23 @@ void mat_solve_normals(
 
   /* Cholesky factorization */
   bool is_spd = true;
+
+  double t_factorize = 0.0;
+  double t_solve = 0.0;
+
+  t_factorize = omp_get_wtime();
+
   SPLATT_BLAS(potrf)(&uplo, &order, neqs, &lda, &info);
+
+  t_factorize = omp_get_wtime() - t_factorize;
+
   if(info) {
     fprintf(stderr, "SPLATT: Gram matrix is not SPD. Trying `GELSS`.\n");
     is_spd = false;
   }
+  // printf("order\tlda\tnhrs\n%d\t%d\t%d\n", order, lda, nrhs);
+
+  t_solve = omp_get_wtime();
 
   /* Continue with Cholesky */
   if(is_spd) {
@@ -601,6 +650,10 @@ void mat_solve_normals(
     splatt_free(conditions);
     splatt_free(work);
   }
+  t_solve = omp_get_wtime() - t_solve;
+
+  // printf("Factorize\tSolve\n%lf\t%lf\n", t_factorize, t_solve);
+
 
   timer_stop(&timers[TIMER_INV]);
 }
